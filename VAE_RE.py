@@ -147,8 +147,24 @@ reconstruction_errors = []
 model.eval()
 with torch.no_grad():
     for sample in data:
+        # Проверка на наличие nan или inf в данных
+        if np.isnan(sample).any() or np.isinf(sample).any():
+            print("Обнаружены некорректные значения в данных. Пропускаем этот образец.")
+            continue
+        
+        # Проверка на корректность данных 
+        if not (np.all(sample >= -1) and np.all(sample <= 1)):
+            print("Обнаружены данные вне допустимого диапазона. Пропускаем этот образец.")
+            continue
+        
         sample_tensor = torch.tensor(sample, dtype=torch.float32).unsqueeze(0)
         output, mu, logvar = model(sample_tensor)
+        
+        # Проверка на наличие nan или inf в выходных данных
+        if torch.isnan(output).any() or torch.isinf(output).any():
+            print("Обнаружены некорректные значения в выходных данных. Пропускаем этот образец.")
+            continue
+        
         reconstruction_error = nn.functional.mse_loss(output, sample_tensor).item()
         reconstruction_errors.append(reconstruction_error)
 
@@ -160,7 +176,6 @@ sorted_indices = np.argsort(reconstruction_errors)[::-1]  # Сортируем �
 top_100_indices = sorted_indices[:100]
 top_100_errors = reconstruction_errors[top_100_indices]
 
-# Должен быть пик
 # Вывод результатов
 print("Индексы 100 образцов с наибольшей реконструкционной ошибкой:", top_100_indices)
 print("Реконструкционные ошибки для этих образцов:", top_100_errors)
