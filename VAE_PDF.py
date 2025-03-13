@@ -7,6 +7,7 @@ from scipy.stats import multivariate_normal
 import numpy as np
 import matplotlib.pyplot as plt
 import random
+from sklearn.model_selection import train_test_split
 
 # Уменьшаем вариативность весов
 seed = 42
@@ -18,25 +19,30 @@ random.seed(seed)
 data, metadata = plasticc_gp()
 data = data[:, :-11]
 filtered_data = data[(data >= -1).all(axis=1) & (data <= 1).all(axis=1)]
+filtered_metadata = metadata[(data >= -1).all(axis=1) & (data <= 1).all(axis=1)]
 
 # Определение VAE
 class VariationalAutoencoder(nn.Module):
     def __init__(self, input_dim, latent_dim):
         super(VariationalAutoencoder, self).__init__()
         self.encoder = nn.Sequential(
-            nn.Linear(input_dim, 7),
+            nn.Linear(input_dim, 64),
             nn.ReLU(),
-            nn.Linear(7, 2),
-            nn.ReLU()
+            nn.Linear(64, 32),
+            nn.ReLU(),
+            # nn.Linear(32, 16),
+            # nn.ReLU()
         )
-        self.mu_layer = nn.Linear(2, latent_dim)
-        self.logvar_layer = nn.Linear(2, latent_dim)
+        self.mu_layer = nn.Linear(32, latent_dim)
+        self.logvar_layer = nn.Linear(32, latent_dim)
         self.decoder = nn.Sequential(
-            nn.Linear(latent_dim, 2),
+            nn.Linear(latent_dim, 32),
             nn.ReLU(),
-            nn.Linear(2, 7), 
+            nn.Linear(32, 64), 
             nn.ReLU(),
-            nn.Linear(7, input_dim)
+            # nn.Linear(32, 64), 
+            # nn.ReLU(),
+            nn.Linear(64, input_dim)
         )
 
     def encode(self, x):
@@ -59,7 +65,11 @@ class VariationalAutoencoder(nn.Module):
         return self.decode(z), mu, logvar
 
 # Функция потерь для VAE
-def loss_function(recon_x, x, mu, logvar, kld_weight=0.6, recon_weight=1.2):
+def loss_function(recon_x, x, mu, logvar, kld_weight=0.5, recon_weight=1.0):
+     # Проверка logvar
+    if torch.isnan(logvar).any() or torch.isinf(logvar).any():
+        print("Обнаружены некорректные значения в logvar.")
+        return torch.tensor(0.0, requires_grad=True)  # Возвращаем нулевой тензор
     BCE = recon_weight * nn.functional.mse_loss(recon_x, x, reduction='sum')
     KLD = kld_weight * -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
     return BCE + KLD
@@ -75,29 +85,33 @@ class MyDataset(Dataset):
     def __getitem__(self, idx):
         return torch.tensor(self.data[idx], dtype=torch.float32)
 
-# Разделение данных на обучающую и валидационную выборки
-train_data = filtered_data[:int(0.7 * len(data))]
-val_data = filtered_data[int(0.3 * len(data)):]
+# Разбиваем данные на обучающую и валидационную выборки с сохранением пропорций аномалий
+train_data, val_data, train_labels, val_labels = train_test_split(
+    filtered_data, filtered_data, test_size=0.3, stratify=filtered_metadata, random_state=seed)
 
 train_dataset = MyDataset(train_data)
 val_dataset = MyDataset(val_data)
 
-train_dataloader = DataLoader(train_dataset, batch_size=22, shuffle=True)
-val_dataloader = DataLoader(val_dataset, batch_size=22, shuffle=False)
+train_dataloader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+val_dataloader = DataLoader(val_dataset, batch_size=64, shuffle=False)
 
 # Параметры модели
 input_dim = data.shape[1]
-latent_dim = 2
+# latent_dim = 2
+# latent_dim = 4
+# latent_dim = 8
+latent_dim = 16
 
 # Создание модели
 model = VariationalAutoencoder(input_dim, latent_dim)
 
 # Оптимизация
-optimizer = optim.SGD(model.parameters(), lr=0.000025)
+# optimizer = optim.SGD(model.parameters(), lr=0.000025)
+optimizer = optim.Adam(model.parameters(), lr=0.001)
 
 # Обучение модели
-epochs = 50
-kld_weight = 1.5
+epochs = 100
+kld_weight = 0.5
 recon_weight = 1.0
 
 train_losses = []
@@ -147,7 +161,7 @@ latent_representations = []
 
 model.eval()
 with torch.no_grad():
-    for sample in data:
+    for sample in filtered_data:
         sample_tensor = torch.tensor(sample, dtype=torch.float32).unsqueeze(0)
         mu, logvar = model.encode(sample_tensor)
         latent_representations.append(mu.numpy())  # Преобразуем в NumPy массив
@@ -160,22 +174,27 @@ mean = np.mean(latent_representations, axis=0)
 cov = np.cov(latent_representations, rowvar=False)
 
 # Вычисление плотности вероятности
-pdf_values = multivariate_normal.pdf(latent_representations, mean=mean, cov=cov)
+pdf_values = multivariate_normal.pdf(latent_representations, mean=mean, cov=cov, allow_singular=True)
 
 # Сортировка по убыванию и выбор 100 самых маленьких
 sorted_indices = np.argsort(pdf_values)  # Сортируем по возрастанию
 top_100_indices = sorted_indices[:100]
 top_100_pdf_values = pdf_values[top_100_indices]
 
+# Получаем соответствующие объекты и метки
+top_100_objects = filtered_data[top_100_indices]
+top_100_labels = filtered_metadata[top_100_indices]
+
 # Вывод результатов
 print("Индексы 100 образцов с наименьшей плотностью вероятности:", top_100_indices)
 print("Плотности вероятности для этих образцов:", top_100_pdf_values)
+print("Метки для этих образцов:", top_100_labels)
 
 # Построение гистограммы для плотности распределения (должен быть пик)
 plt.figure(figsize=(8, 4))
 plt.hist(pdf_values, bins=30, density=True, alpha=0.7, color='blue')
-plt.title('Гистограмма плотности распределения скрытых представлений')
-plt.xlabel('Значения')
+plt.title('PDF')
+plt.xlabel('pdf_values')
 plt.ylabel('Плотность')
 plt.grid()
 plt.show()
