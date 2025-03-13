@@ -6,6 +6,7 @@ from plasticc_gp import plasticc_gp
 import numpy as np
 import matplotlib.pyplot as plt
 import random
+from sklearn.model_selection import train_test_split
 
 # Уменьшаем вариативность весов
 seed = 42
@@ -83,9 +84,13 @@ class MyDataset(Dataset):
     def __getitem__(self, idx):
         return torch.tensor(self.data[idx], dtype=torch.float32)
 
-# Разделение данных на обучающую и валидационную выборки
-train_data = filtered_data[:int(0.7 * len(data))]
-val_data = filtered_data[int(0.3 * len(data)):]
+# # Разделение данных на обучающую и валидационную выборки
+# train_data = filtered_data[:int(0.7 * len(data))]
+# val_data = filtered_data[int(0.3 * len(data)):]
+
+# Разбиваем данные на обучающую и валидационную выборки с сохранением пропорций аномалий
+train_data, val_data, train_labels, val_labels = train_test_split(
+    filtered_data, filtered_data, test_size=0.3, stratify=filtered_metadata, random_state=seed)
 
 train_dataset = MyDataset(train_data)
 val_dataset = MyDataset(val_data)
@@ -95,20 +100,21 @@ val_dataloader = DataLoader(val_dataset, batch_size=64, shuffle=False)
 
 # Параметры модели
 input_dim = data.shape[1]
-latent_dim = 2
+# latent_dim = 2
 # latent_dim = 4
 # latent_dim = 8
-# latent_dim = 16
+latent_dim = 16
 
 # Создание модели
 model = VariationalAutoencoder(input_dim, latent_dim)
 
 # Оптимизация
-optimizer = optim.SGD(model.parameters(), lr=0.00002, momentum=0.9)
+# optimizer = optim.SGD(model.parameters(), lr=0.00002, momentum=0.9)
+optimizer = optim.Adam(model.parameters(), lr=0.001)
 
 # Обучение модели
 epochs = 100
-kld_weight = 0.6
+kld_weight = 0.5
 recon_weight = 1.0
 
 train_losses = []
@@ -215,8 +221,8 @@ print("Метки для этих образцов:", top_100_labels)
 
 plt.figure(figsize=(8, 4))
 plt.hist(reconstruction_errors, bins=30, density=True, alpha=0.6, color='g')
-plt.title(f'Гистограмма для латентного слоя')
-plt.xlabel('Значение')
+plt.title(f'Гистограмма RE')
+plt.xlabel('reconstruction_error')
 plt.ylabel('Плотность')
 plt.grid(True)
 plt.show()
