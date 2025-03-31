@@ -8,11 +8,15 @@ import matplotlib.pyplot as plt
 import random
 from sklearn.model_selection import train_test_split
 
-# Уменьшаем вариативность весов
+# Устанавливаем seed для воспроизводимости
 seed = 42
 torch.manual_seed(seed)
 np.random.seed(seed)
 random.seed(seed)
+
+# Проверяем доступность GPU
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f"Using device: {device}")
 
 # Загрузка данных
 data, metadata = plasticc_gp()
@@ -23,74 +27,78 @@ filtered_metadata = metadata[(data >= -1).all(axis=1) & (data <= 1).all(axis=1)]
 # VAE
 class VariationalAutoencoder(nn.Module):
     def __init__(self, input_dim, latent_dim):
-        super(VariationalAutoencoder, self).__init__()
+        super().__init__()
         self.input_dim = input_dim
-        
-        # Encoder 
+        self.latent_dim = latent_dim
+
+        # Энкодер
         self.encoder = nn.Sequential(
-            nn.Conv1d(1, 32, kernel_size=3, stride=1, padding='same'),
+            nn.Conv1d(1, 32, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm1d(32),
             nn.LeakyReLU(),
             
-            nn.Conv1d(32, 64, kernel_size=3, stride=1, padding='same'),
+            nn.Conv1d(32, 64, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm1d(64),
             nn.LeakyReLU(),
             
-            nn.Conv1d(64, 128, kernel_size=3, stride=1, padding='same'),
+            nn.Conv1d(64, 128, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm1d(128),
             nn.LeakyReLU(),
         )
         
+        # Автоматический расчет выходного размера энкодера
+        self.encoded_dim = input_dim
+        for _ in range(3):
+            self.encoded_dim = (self.encoded_dim + 1) // 2  # Для stride=2
+        
+        # Global pooling и линейные слои
         self.global_pool = nn.AdaptiveAvgPool1d(1)
+        self.fc_mu = nn.Linear(128, latent_dim)
+        self.fc_logvar = nn.Linear(128, latent_dim)
         
-        self.mu_layer = nn.Linear(128, latent_dim)
-        self.logvar_layer = nn.Linear(128, latent_dim)
-        
-        # Decoder
-        self.decoder_linear = nn.Linear(latent_dim, 128)
-        
+        # Декодер с адаптивными слоями
         self.decoder = nn.Sequential(
-            nn.Conv1d(128, 64, kernel_size=3, stride=1, padding='same'),
+            nn.Linear(latent_dim, 128 * self.encoded_dim),
+            nn.Unflatten(1, (128, self.encoded_dim)),
+            
+            nn.ConvTranspose1d(128, 64, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm1d(64),
             nn.LeakyReLU(),
             
-            nn.Conv1d(64, 32, kernel_size=3, stride=1, padding='same'),
+            nn.ConvTranspose1d(64, 32, kernel_size=3, stride=2, padding=1),
             nn.BatchNorm1d(32),
             nn.LeakyReLU(),
             
-            nn.Conv1d(32, 1, kernel_size=3, stride=1, padding='same'),
-            nn.Tanh() # Так как данные в диапазоне [-1, 1]
+            nn.ConvTranspose1d(32, 1, kernel_size=3, stride=2, padding=1),
+            nn.AdaptiveAvgPool1d(input_dim)  # Гарантируем правильный выходной размер
         )
     
     def encode(self, x):
-        x = x.unsqueeze(1)  
-        h = self.encoder(x)  
-        h = self.global_pool(h).squeeze(-1)  
-        mu = self.mu_layer(h)
-        logvar = self.logvar_layer(h)
-        return mu, logvar
+        x = x.unsqueeze(1)  # [batch, 1, input_dim]
+        h = self.encoder(x)  # [batch, 128, encoded_dim]
+        h_pooled = self.global_pool(h).squeeze(2)  # [batch, 128]
+        return self.fc_mu(h_pooled), self.fc_logvar(h_pooled)
     
     def reparameterize(self, mu, logvar):
-        std = torch.exp(0.5 * logvar)
+        std = torch.exp(0.5*logvar)
         eps = torch.randn_like(std)
-        return mu + eps * std
+        return mu + eps*std
     
     def decode(self, z):
-        h = self.decoder_linear(z)  
-        h = h.unsqueeze(-1).expand(-1, -1, self.input_dim)  
-        recon = self.decoder(h)  
-        return recon.squeeze(1)  
+        return self.decoder(z).squeeze(1)
     
     def forward(self, x):
         mu, logvar = self.encode(x)
         z = self.reparameterize(mu, logvar)
         return self.decode(z), mu, logvar
 
+    # def forward(self, x):
+    #     mu, logvar = self.encode(x)
+    #     z = self.reparameterize(mu, logvar)
+    #     return self.decode(z), mu, logvar
+
 # Функция потерь для VAE
 def loss_function(recon_x, x, mu, logvar, kld_weight=0.5, recon_weight=1.0):
-    if torch.isnan(logvar).any() or torch.isinf(logvar).any():
-        print("Обнаружены некорректные значения в logvar.")
-        return torch.tensor(0.0, requires_grad=True)
     BCE = recon_weight * nn.functional.mse_loss(recon_x, x, reduction='sum')
     KLD = kld_weight * -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
     return BCE + KLD
@@ -118,19 +126,16 @@ val_dataloader = DataLoader(val_dataset, batch_size=64, shuffle=False)
 
 # Параметры модели
 input_dim = data.shape[1]
-# latent_dim = 2
-# latent_dim = 4
-# latent_dim = 8
 latent_dim = 16
 
-# Создание модели
-model = VariationalAutoencoder(input_dim, latent_dim)
+# Создание модели и перенос на GPU
+model = VariationalAutoencoder(input_dim, latent_dim).to(device)
 
 # Оптимизация
 optimizer = optim.Adam(model.parameters(), lr=0.001)
 
 # Обучение модели
-epochs = 50
+epochs = 100
 kld_weight = 0.5
 recon_weight = 1.0
 
@@ -141,6 +146,7 @@ for epoch in range(epochs):
     model.train()
     train_loss = 0
     for batch in train_dataloader:
+        batch = batch.to(device)
         optimizer.zero_grad()
         recon_batch, mu, logvar = model(batch)
         loss = loss_function(recon_batch, batch, mu, logvar, kld_weight, recon_weight)
@@ -157,6 +163,7 @@ for epoch in range(epochs):
     val_loss = 0
     with torch.no_grad():
         for batch in val_dataloader:
+            batch = batch.to(device)
             recon_batch, mu, logvar = model(batch)
             loss = loss_function(recon_batch, batch, mu, logvar, kld_weight, recon_weight)
             val_loss += loss.item()
@@ -174,7 +181,9 @@ plt.ylabel('Loss')
 plt.title('Training and Validation Loss')
 plt.legend()
 plt.grid(True)
-plt.show()
+# plt.show()
+plt.savefig('training_loss.pdf', format='pdf', bbox_inches='tight')
+plt.close()
 
 # Рассчет reconstruction errors для каждого образца
 reconstruction_errors = []
@@ -182,7 +191,7 @@ reconstruction_errors = []
 model.eval()
 with torch.no_grad():
     for sample in filtered_data:
-        sample_tensor = torch.tensor(sample, dtype=torch.float32).unsqueeze(0)
+        sample_tensor = torch.tensor(sample, dtype=torch.float32).unsqueeze(0).to(device)
         output, mu, logvar = model(sample_tensor)
         reconstruction_error = nn.functional.mse_loss(output, sample_tensor).item()
         reconstruction_errors.append(reconstruction_error)
@@ -210,4 +219,6 @@ plt.title(f'Гистограмма RE')
 plt.xlabel('reconstruction_error')
 plt.ylabel('Плотность')
 plt.grid(True)
-plt.show()
+# plt.show()
+plt.savefig('reconstruction_errors.pdf', format='pdf', bbox_inches='tight')
+plt.close()
