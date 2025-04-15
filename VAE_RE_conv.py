@@ -33,15 +33,15 @@ class VariationalAutoencoder(nn.Module):
 
         # Энкодер
         self.encoder = nn.Sequential(
-            nn.Conv1d(1, 32, kernel_size=3, stride=2, padding=1),
+            nn.Conv1d(1, 32, kernel_size=3, stride=2, padding=1, bias=False),
             nn.BatchNorm1d(32),
             nn.LeakyReLU(),
             
-            nn.Conv1d(32, 64, kernel_size=3, stride=2, padding=1),
+            nn.Conv1d(32, 64, kernel_size=3, stride=2, padding=1, bias=False),
             nn.BatchNorm1d(64),
             nn.LeakyReLU(),
             
-            nn.Conv1d(64, 128, kernel_size=3, stride=2, padding=1),
+            nn.Conv1d(64, 128, kernel_size=3, stride=2, padding=1, bias=False),
             nn.BatchNorm1d(128),
             nn.LeakyReLU(),
         )
@@ -51,33 +51,37 @@ class VariationalAutoencoder(nn.Module):
         for _ in range(3):
             self.encoded_dim = (self.encoded_dim + 1) // 2  # Для stride=2
         
-        # Global pooling и линейные слои
-        self.global_pool = nn.AdaptiveAvgPool1d(1)
-        self.fc_mu = nn.Linear(128, latent_dim)
-        self.fc_logvar = nn.Linear(128, latent_dim)
+        # Линейные слои для mu и logvar
+        self.fc_mu = nn.Linear(128 * self.encoded_dim, latent_dim)
+        self.fc_logvar = nn.Linear(128 * self.encoded_dim, latent_dim)
         
-        # Декодер с адаптивными слоями
+        # Декодер
         self.decoder = nn.Sequential(
             nn.Linear(latent_dim, 128 * self.encoded_dim),
             nn.Unflatten(1, (128, self.encoded_dim)),
             
-            nn.ConvTranspose1d(128, 64, kernel_size=3, stride=2, padding=1),
+            nn.ConvTranspose1d(128, 64, kernel_size=3, stride=2, padding=1, output_padding=1, bias=False),
             nn.BatchNorm1d(64),
             nn.LeakyReLU(),
             
-            nn.ConvTranspose1d(64, 32, kernel_size=3, stride=2, padding=1),
+            nn.ConvTranspose1d(64, 32, kernel_size=3, stride=2, padding=1, output_padding=1, bias=False),
             nn.BatchNorm1d(32),
             nn.LeakyReLU(),
             
-            nn.ConvTranspose1d(32, 1, kernel_size=3, stride=2, padding=1),
-            nn.AdaptiveAvgPool1d(input_dim)  # Гарантируем правильный выходной размер
+            nn.ConvTranspose1d(32, 32, kernel_size=3, stride=2, padding=1, output_padding=1, bias=False),
+            nn.BatchNorm1d(32),
+            nn.LeakyReLU(),
+            
+            # Финальная свертка с padding для точного соответствия размеров
+            nn.Conv1d(32, 1, kernel_size=3, padding=1, bias=True),
+            nn.AdaptiveAvgPool1d(input_dim)  # Гарантируем точный размер выхода
         )
     
     def encode(self, x):
         x = x.unsqueeze(1)  # [batch, 1, input_dim]
         h = self.encoder(x)  # [batch, 128, encoded_dim]
-        h_pooled = self.global_pool(h).squeeze(2)  # [batch, 128]
-        return self.fc_mu(h_pooled), self.fc_logvar(h_pooled)
+        h_flat = h.view(h.size(0), -1)  # [batch, 128 * encoded_dim]
+        return self.fc_mu(h_flat), self.fc_logvar(h_flat)
     
     def reparameterize(self, mu, logvar):
         std = torch.exp(0.5*logvar)
@@ -91,11 +95,6 @@ class VariationalAutoencoder(nn.Module):
         mu, logvar = self.encode(x)
         z = self.reparameterize(mu, logvar)
         return self.decode(z), mu, logvar
-
-    # def forward(self, x):
-    #     mu, logvar = self.encode(x)
-    #     z = self.reparameterize(mu, logvar)
-    #     return self.decode(z), mu, logvar
 
 # Функция потерь для VAE
 def loss_function(recon_x, x, mu, logvar, kld_weight=0.5, recon_weight=1.0):
@@ -126,6 +125,9 @@ val_dataloader = DataLoader(val_dataset, batch_size=64, shuffle=False)
 
 # Параметры модели
 input_dim = data.shape[1]
+# latent_dim = 2
+# latent_dim = 4
+# latent_dim = 8
 latent_dim = 16
 
 # Создание модели и перенос на GPU
@@ -156,7 +158,7 @@ for epoch in range(epochs):
     
     train_loss /= len(train_dataloader.dataset)
     train_losses.append(train_loss)
-    print(f"Epoch: {epoch+1}, Train Loss: {train_loss}")
+    print(f"Epoch: {epoch+1}, Train Loss: {train_loss:.6f}")
 
     # Оценка на валидационной выборке
     model.eval()
@@ -170,7 +172,7 @@ for epoch in range(epochs):
     
     val_loss /= len(val_dataloader.dataset)
     val_losses.append(val_loss)
-    print(f"Epoch: {epoch+1}, Validation Loss: {val_loss}")
+    print(f"Epoch: {epoch+1}, Validation Loss: {val_loss:.6f}")
 
 # Построение графика потерь
 plt.figure(figsize=(10, 5))
@@ -181,7 +183,6 @@ plt.ylabel('Loss')
 plt.title('Training and Validation Loss')
 plt.legend()
 plt.grid(True)
-# plt.show()
 plt.savefig('training_loss.pdf', format='pdf', bbox_inches='tight')
 plt.close()
 
@@ -219,6 +220,5 @@ plt.title(f'Гистограмма RE')
 plt.xlabel('reconstruction_error')
 plt.ylabel('Плотность')
 plt.grid(True)
-# plt.show()
 plt.savefig('reconstruction_errors.pdf', format='pdf', bbox_inches='tight')
 plt.close()
